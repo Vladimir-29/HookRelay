@@ -1,2 +1,2 @@
 .env
-/hookrelay
+/cmd/hookrelay/hookrelay

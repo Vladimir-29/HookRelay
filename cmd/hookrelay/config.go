@@ -6,6 +6,7 @@ import (
 	"strconv"
 )
 
+// config хранит адрес сервера и URL базы данных
 type config struct {
 	ServerPort  string
 	DatabaseURL string

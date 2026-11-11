@@ -1,4 +1,6 @@
-package main
+//Package httpapi реализует HTTP-слой сервиса: маршруты, handlers,
+// валидацию входа и DTO. Бизнес-логика и работа с БД — в других пакетах.
+package httpapi
 
 import (
 	"context"
@@ -6,14 +8,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"hookrelay/internal/postgres"
 )
 
-// newServer создаёт HTTP-сервер с маршрутом /health. Порт передаётся
+// NewServer создаёт HTTP-сервер с маршрутами API. Порт передаётся
 // без ведущего двоеточия.
-func newServer(port string, pool *pgxpool.Pool) *http.Server {
+func NewServer(port string, store *postgres.Store) *http.Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", healthHandler(pool))
+	mux.HandleFunc("GET /health", healthHandler(store))
+	mux.HandleFunc("POST /api/v1/endpoints", createEndpointHandler(store))
 
 	return &http.Server{
 		Addr:              ":" + port,
@@ -24,12 +27,12 @@ func newServer(port string, pool *pgxpool.Pool) *http.Server {
 
 // healthHandler — readiness-проба: пингует БД. Таймаут 2с — бюджет пробы.
 // Возвращает 200/503 и JSON {status:"ok"|"unavailable"}.
-func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
+func healthHandler(store *postgres.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
-		if err := pool.Ping(ctx); err != nil {
+		if err := store.Ping(ctx); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 			return
 		}

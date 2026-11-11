@@ -3,29 +3,39 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"hookrelay/internal/httpapi"
+	"hookrelay/internal/postgres"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		return fmt.Errorf("config: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := connectDB(ctx, cfg.DatabaseURL)
+	store, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		return fmt.Errorf("database: %w", err)
 	}
-	defer pool.Close()
+	defer store.Close()
 
-	server := newServer(cfg.ServerPort, pool)
+	server := httpapi.NewServer(cfg.ServerPort, store)
 
 	// Буфер 1: main может уже уйти в shutdown по сигналу, и без буфера
 	// горутина сервера навсегда зависнет на отправке в errCh.
@@ -41,7 +51,7 @@ func main() {
 	case err := <-errCh:
 		// ErrServerClosed — штатный результат Shutdown, а не авария.
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server: %v", err)
+			return fmt.Errorf("server: %w", err)
 		}
 	}
 
@@ -50,6 +60,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("graceful shutdown: %v", err)
+		return fmt.Errorf("graceful shutdown: %w", err)
 	}
+	return nil
 }
