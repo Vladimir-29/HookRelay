@@ -1,3 +1,4 @@
+// Package postgres предоставляет реализацию хранилища в PostgreSQL.
 package postgres
 
 import (

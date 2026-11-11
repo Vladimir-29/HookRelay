@@ -14,6 +14,9 @@ import (
 	"hookrelay/internal/postgres"
 )
 
+// maxJSONBody — лимит тела JSON-запросов.
+const maxJSONBody = 1 << 20 // 1 MiB
+
 // createEndpointRequest — DTO тела POST /api/v1/endpoints.
 // Не смешивается с доменной моделью domain.Endpoint.
 type createEndpointRequest struct {
@@ -25,20 +28,7 @@ type createEndpointRequest struct {
 func createEndpointHandler(store *postgres.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createEndpointRequest
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
-			} else {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-			}
-			return
-		}
-		var extra any
-		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		if !decodeJSONBody(w, r, &req, maxJSONBody) {
 			return
 		}
 
@@ -63,6 +53,29 @@ func createEndpointHandler(store *postgres.Store) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusCreated, ep)
 	}
+}
+
+// decodeJSONBody строго декодирует один JSON-объект в dst: тело ограничено
+// maxBytes, неизвестные поля запрещены, второй объект или мусор — ошибка.
+// При ошибке сам пишет ответ (413 или 400) и возвращает false.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		}
+		return false
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return false
+	}
+	return true
 }
 
 // validateURL требует абсолютный URL со схемой http/https, потому что
