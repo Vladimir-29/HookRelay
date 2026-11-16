@@ -1,4 +1,4 @@
-//Package httpapi реализует HTTP-слой сервиса: маршруты, handlers,
+// Package httpapi реализует HTTP-слой сервиса: маршруты, handlers,
 // валидацию входа и DTO. Бизнес-логика и работа с БД — в других пакетах.
 package httpapi
 

@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"hookrelay/internal/delivery"
 	"hookrelay/internal/httpapi"
 	"hookrelay/internal/postgres"
+	"hookrelay/internal/worker"
 )
 
 func main() {
@@ -35,6 +37,13 @@ func run() error {
 	}
 	defer store.Close()
 
+	if cfg.AppMode == "worker" {
+		return runWorker(ctx, cfg, store)
+	}
+	return runAPI(ctx, cfg, store)
+}
+
+func runAPI(ctx context.Context, cfg config, store *postgres.Store) error {
 	server := httpapi.NewServer(cfg.ServerPort, store)
 
 	// Буфер 1: main может уже уйти в shutdown по сигналу, и без буфера
@@ -62,5 +71,17 @@ func run() error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
+	return nil
+}
+
+func runWorker(ctx context.Context, cfg config, store *postgres.Store) error {
+	sender := delivery.New(cfg.DeliveryHTTPTimeout)
+	w := worker.New(store, sender, worker.Config{
+		BatchSize:    cfg.WorkerBatchSize,
+		PollInterval: cfg.WorkerPollInterval,
+		Lease:        cfg.WorkerLease,
+		RetryDelay:   cfg.WorkerRetryDelay,
+	})
+	w.Run(ctx)
 	return nil
 }
