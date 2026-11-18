@@ -55,7 +55,7 @@ func listEndpointsHandler(store *postgres.Store) http.HandlerFunc {
 // GET /api/v1/endpoints/{id}/subscriptions — список типов событий endpoint.
 func getSubscriptionsHandler(store *postgres.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := parseEndpointID(w, r)
+		id, ok := parsePathID(w, r)
 		if !ok {
 			return
 		}
@@ -81,7 +81,7 @@ func getSubscriptionsHandler(store *postgres.Store) http.HandlerFunc {
 // Пустой массив удаляет все подписки.
 func replaceSubscriptionsHandler(store *postgres.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := parseEndpointID(w, r)
+		id, ok := parsePathID(w, r)
 		if !ok {
 			return
 		}
@@ -111,8 +111,8 @@ func replaceSubscriptionsHandler(store *postgres.Store) http.HandlerFunc {
 	}
 }
 
-// parseEndpointID извлекает и проверяет id из path. При ошибке пишет 400.
-func parseEndpointID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+// parsePathID извлекает и проверяет числовой id из path {id}. При ошибке пишет 400.
+func parsePathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid endpoint id"})

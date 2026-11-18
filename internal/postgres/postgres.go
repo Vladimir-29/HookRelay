@@ -31,6 +31,12 @@ func Connect(ctx context.Context, url string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
+// Pool возвращает внутренний пул соединений. Предназначен для тестовых
+// фикстур и разовых операций; прикладной код должен использовать методы Store.
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
 // Close освобождает все соединения пула.
 func (s *Store) Close() {
 	s.pool.Close()

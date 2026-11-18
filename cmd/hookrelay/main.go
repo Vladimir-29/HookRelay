@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"hookrelay/internal/delivery"
+	"hookrelay/internal/domain"
 	"hookrelay/internal/httpapi"
 	"hookrelay/internal/postgres"
 	"hookrelay/internal/worker"
@@ -80,7 +81,11 @@ func runWorker(ctx context.Context, cfg config, store *postgres.Store) error {
 		BatchSize:    cfg.WorkerBatchSize,
 		PollInterval: cfg.WorkerPollInterval,
 		Lease:        cfg.WorkerLease,
-		RetryDelay:   cfg.WorkerRetryDelay,
+		Retry: domain.RetryPolicy{
+			BaseDelay:  cfg.WorkerRetryDelay,
+			MaxDelay:   cfg.WorkerMaxRetryDelay,
+			MaxRetries: cfg.WorkerMaxRetries,
+		},
 	})
 	w.Run(ctx)
 	return nil

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"hookrelay/internal/domain"
 )
 
@@ -80,26 +82,25 @@ const maxDiagnosticLen = 1024
 // SaveDeliveryResult сохраняет результат одной HTTP-попытки и обновляет
 // доставку в одной транзакции:
 //   - Success (2xx)         → status='succeeded'
-//   - Retryable             → status='pending', available_at = now()+retryDelay
-//   - иначе                 → status='dead'
+//   - Retryable, attempts+1 <= policy.MaxRetries → status='pending',
+//     available_at = now()+policy.Delay(completed)
+//   - Retryable, повторов нет → status='dead'
+//   - иначе (4xx и пр.)     → status='dead'
+//
+// Лимит повторов проверяется в SQL по фактическому значению attempts
+// (атомарно с инкрементом): newAttempts <= MaxRetries означает, что
+// после этой попытки ещё разрешён автоматический повтор. При
+// MaxRetries=5 временная ошибка на 6-й попытке → dead.
 //
 // attempts увеличивается ровно на 1, запись добавляется в
 // delivery_attempts, lease-поля очищаются.
 //
-// Обновление выполняется только если доставка всё ещё в processing
-// и locked_by совпадает с workerID — устаревший Worker (lease истёк,
-// задачу перехватил другой) не перезапишет чужой результат.
-// В этом случае возвращается pgx.ErrNoRows.
-func (s *Store) SaveDeliveryResult(ctx context.Context, workerID string, deliveryID int64,
-	res domain.DeliveryResult, retryDelay time.Duration) error {
-
-	status := "dead"
-	switch {
-	case res.Success:
-		status = "succeeded"
-	case res.Retryable:
-		status = "pending"
-	}
+// Обновление выполняется только если доставка всё ещё в processing,
+// locked_by совпадает с workerID и attempts равен значению из claim —
+// иначе рассчитанная задержка может не соответствовать счётчику,
+// и UPDATE не меняет запись (pgx.ErrNoRows).
+func (s *Store) SaveDeliveryResult(ctx context.Context, workerID string, d domain.ClaimedDelivery,
+	res domain.DeliveryResult, policy domain.RetryPolicy) error {
 
 	var lastErr any
 	if res.Err != nil {
@@ -117,6 +118,14 @@ func (s *Store) SaveDeliveryResult(ctx context.Context, workerID string, deliver
 		body = res.Body
 	}
 
+	// Задержка перед следующим повтором: после d.Attempts+1 завершённых
+	// попыток. Значение согласовано с attempts+1 в SQL — под lease
+	// счётчик не может измениться между claim и save.
+	var retryDelaySecs float64
+	if res.Retryable && !res.Success {
+		retryDelaySecs = policy.Delay(d.Attempts + 1).Seconds()
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -126,34 +135,86 @@ func (s *Store) SaveDeliveryResult(ctx context.Context, workerID string, deliver
 	var attempts int
 	err = tx.QueryRow(ctx, `
 		UPDATE deliveries SET
-			status       = $3,
+			status = CASE
+				WHEN $3 THEN 'succeeded'
+				WHEN NOT $4 THEN 'dead'
+				WHEN attempts + 1 <= $5 THEN 'pending'
+				ELSE 'dead' END,
 			attempts     = attempts + 1,
-			available_at = CASE WHEN $3 = 'pending'
-			                THEN now() + ($4 * interval '1 second')
-			                ELSE available_at END,
+			available_at = CASE
+				WHEN NOT $3 AND $4 AND attempts + 1 <= $5
+				THEN now() + ($6 * interval '1 second')
+				ELSE available_at END,
 			locked_by    = NULL,
 			locked_until = NULL,
-			last_error   = $5,
+			last_error   = $7,
 			updated_at   = now()
 		WHERE id = $1 AND status = 'processing' AND locked_by = $2
+		  AND attempts = $8
 		RETURNING attempts`,
-		deliveryID, workerID, status, retryDelay.Seconds(), lastErr,
+		d.ID, workerID, res.Success, res.Retryable, policy.MaxRetries,
+		retryDelaySecs, lastErr, d.Attempts,
 	).Scan(&attempts)
 	if err != nil {
 		return err // pgx.ErrNoRows — задача перехвачена другим worker'ом
 	}
 
+	// Номер попытки в истории — сквозной по delivery_attempts:
+	// deliveries.attempts сбрасывается при ручном retry, а история
+	// должна оставаться однозначной → MAX(attempt)+1.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO delivery_attempts
 			(delivery_id, attempt, status_code, response_body, duration_ms, error)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		deliveryID, attempts, statusCode, body,
+		SELECT $1, COALESCE(MAX(attempt), 0) + 1, $2, $3, $4, $5
+		FROM delivery_attempts WHERE delivery_id = $1`,
+		d.ID, statusCode, body,
 		int(res.Duration.Milliseconds()), lastErr,
 	); err != nil {
 		return err
 	}
 
 	return tx.Commit(ctx)
+}
+
+// scanDelivery читает строку deliveries в domain.Delivery.
+func scanDelivery(row interface{ Scan(...any) error }) (domain.Delivery, error) {
+	var d domain.Delivery
+	var lastErr pgtype.Text
+	err := row.Scan(&d.ID, &d.EventID, &d.EndpointID, &d.Status, &d.Attempts,
+		&d.AvailableAt, &lastErr, &d.CreatedAt, &d.UpdatedAt)
+	if lastErr.Valid {
+		s := lastErr.String
+		d.LastError = &s
+	}
+	return d, err
+}
+
+const deliveryColumns = `id, event_id, endpoint_id, status, attempts,
+	available_at, last_error, created_at, updated_at`
+
+// GetDelivery возвращает доставку по id или pgx.ErrNoRows.
+func (s *Store) GetDelivery(ctx context.Context, id int64) (domain.Delivery, error) {
+	return scanDelivery(s.pool.QueryRow(ctx,
+		`SELECT `+deliveryColumns+` FROM deliveries WHERE id = $1`, id))
+}
+
+// RetryDelivery атомарно переводит dead-доставку обратно в pending:
+// available_at=now() (Worker заберёт сразу), attempts=0 — новый цикл
+// автоматических повторов, lease-поля и last_error очищаются.
+// История delivery_attempts не трогается.
+// Если доставка не dead (или не существует) — pgx.ErrNoRows.
+func (s *Store) RetryDelivery(ctx context.Context, id int64) (domain.Delivery, error) {
+	return scanDelivery(s.pool.QueryRow(ctx, `
+		UPDATE deliveries SET
+			status       = 'pending',
+			attempts     = 0,
+			available_at = now(),
+			locked_by    = NULL,
+			locked_until = NULL,
+			last_error   = NULL,
+			updated_at   = now()
+		WHERE id = $1 AND status = 'dead'
+		RETURNING `+deliveryColumns, id))
 }
 
 func truncate(s string, n int) string {

@@ -159,7 +159,11 @@ func testConfig() Config {
 		BatchSize:    10,
 		PollInterval: 50 * time.Millisecond,
 		Lease:        30 * time.Second,
-		RetryDelay:   time.Minute,
+		Retry: domain.RetryPolicy{
+			BaseDelay:  time.Minute,
+			MaxDelay:   10 * time.Minute,
+			MaxRetries: 5,
+		},
 	}
 }
 
@@ -211,7 +215,7 @@ func TestWorkerRetryableReturnsToPending(t *testing.T) {
 	if lastErr == nil || *lastErr != "timeout" {
 		t.Fatalf("last_error = %v", lastErr)
 	}
-	// available_at отодинут на RetryDelay — delivery не должна
+	// available_at отодинут на backoff-задержку — delivery не должна
 	// вернуться в работу раньше времени.
 	var availableAt time.Time
 	if err := pool.QueryRow(context.Background(),
@@ -273,6 +277,42 @@ func TestWorkerParallelBatch(t *testing.T) {
 	}
 }
 
+// TestWorkerRetryExhaustion: вечные временные ошибки — после
+// MaxRetries+1 попыток доставка переходит в dead.
+func TestWorkerRetryExhaustion(t *testing.T) {
+	store, pool := testEnv(t)
+	id := pendingDelivery(t, pool)
+
+	s := &fakeSender{result: domain.DeliveryResult{Retryable: true, Err: fmt.Errorf("boom")}}
+	cfg := testConfig()
+	cfg.Retry = domain.RetryPolicy{
+		BaseDelay:  50 * time.Millisecond,
+		MaxDelay:   500 * time.Millisecond,
+		MaxRetries: 2,
+	}
+	cfg.PollInterval = 20 * time.Millisecond
+
+	cancel, done := runWorker(t, store, s, cfg)
+	defer cancel()
+
+	waitStatus(t, pool, id, "dead")
+	cancel()
+	<-done
+
+	_, attempts, _ := deliveryRow(t, pool, id)
+	if attempts != 3 { // 1 исходная + 2 повтора
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM delivery_attempts WHERE delivery_id = $1`, id).Scan(&n); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("delivery_attempts rows = %d, want 3", n)
+	}
+}
+
 func TestWorkerStopsOnCancel(t *testing.T) {
 	store, pool := testEnv(t)
 	_ = pool
@@ -293,6 +333,64 @@ func TestWorkerStopsOnCancel(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("worker ignored cancellation during poll wait")
+	}
+}
+
+// blockingSender ждёт отмены ctx внутри Send, затем возвращает результат —
+// имитация HTTP-запроса, завершившегося одновременно с shutdown.
+type blockingSender struct {
+	fakeSender
+}
+
+func (b *blockingSender) Send(ctx context.Context, d domain.ClaimedDelivery) domain.DeliveryResult {
+	<-ctx.Done()
+	return domain.DeliveryResult{StatusCode: 200, Success: true, Duration: time.Millisecond}
+}
+
+// TestWorkerSavesResultOnShutdown: Send завершился после отмены ctx —
+// результат всё равно сохраняется (WithoutCancel + timeout), доставка
+// доходит до succeeded, а не висит до lease.
+func TestWorkerSavesResultOnShutdown(t *testing.T) {
+	store, pool := testEnv(t)
+	id := pendingDelivery(t, pool)
+
+	s := &blockingSender{}
+	cfg := testConfig()
+	cfg.PollInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		New(store, s, cfg).Run(ctx)
+		close(done)
+	}()
+
+	// Ждём, пока worker захватит и начнёт обрабатывать доставку.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var status string
+		_ = pool.QueryRow(context.Background(),
+			`SELECT status FROM deliveries WHERE id = $1`, id).Scan(&status)
+		if status == "processing" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("delivery was not claimed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel() // Send вернётся по ctx.Done, save должен пройти
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+
+	waitStatus(t, pool, id, "succeeded")
+	_, attempts, _ := deliveryRow(t, pool, id)
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }
 

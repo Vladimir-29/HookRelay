@@ -27,11 +27,11 @@ type Sender interface {
 
 // Config — настройки Worker'а.
 type Config struct {
-	WorkerID     string        // пусто → генерируется уникальный
-	BatchSize    int           // размер пакета ClaimDeliveries
-	PollInterval time.Duration // пауза между опросами, когда задач нет
-	Lease        time.Duration // длительность lease при захвате
-	RetryDelay   time.Duration // задержка перед повторной попыткой
+	WorkerID     string             // пусто → генерируется уникальный
+	BatchSize    int                // размер пакета ClaimDeliveries
+	PollInterval time.Duration      // пауза между опросами, когда задач нет
+	Lease        time.Duration      // длительность lease при захвате
+	Retry        domain.RetryPolicy // exponential backoff + лимит повторов
 }
 
 // Worker периодически забирает и обрабатывает доставки.
@@ -100,7 +100,13 @@ func (w *Worker) processBatch(ctx context.Context, deliveries []domain.ClaimedDe
 		go func(d domain.ClaimedDelivery) {
 			defer wg.Done()
 			res := w.sender.Send(ctx, d)
-			err := w.store.SaveDeliveryResult(ctx, w.cfg.WorkerID, d.ID, res, w.cfg.RetryDelay)
+			// Результат сохраняем, даже если ctx уже отменён:
+			// отдельный контекст с таймаутом. Без этого при shutdown
+			// завершённая попытка потеряется и будет повторена
+			// после истечения lease.
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err := w.store.SaveDeliveryResult(saveCtx, w.cfg.WorkerID, d, res, w.cfg.Retry)
+			cancel()
 			switch {
 			case err == nil:
 			case errors.Is(err, pgx.ErrNoRows):

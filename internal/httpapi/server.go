@@ -21,6 +21,7 @@ func NewServer(port string, store *postgres.Store) *http.Server {
 	mux.HandleFunc("GET /api/v1/endpoints/{id}/subscriptions", getSubscriptionsHandler(store))
 	mux.HandleFunc("PUT /api/v1/endpoints/{id}/subscriptions", replaceSubscriptionsHandler(store))
 	mux.HandleFunc("POST /api/v1/events", createEventHandler(store))
+	mux.HandleFunc("POST /api/v1/deliveries/{id}/retry", retryDeliveryHandler(store))
 
 	return &http.Server{
 		Addr:              ":" + port,

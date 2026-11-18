@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"hookrelay/internal/domain"
 )
 
 // config хранит адрес сервера, URL базы данных и настройки режимов.
@@ -18,6 +20,8 @@ type config struct {
 	WorkerLease         time.Duration
 	DeliveryHTTPTimeout time.Duration
 	WorkerRetryDelay    time.Duration
+	WorkerMaxRetryDelay time.Duration
+	WorkerMaxRetries    int
 }
 
 // leaseSafetyMargin — запас lease над HTTP-таймаутом: пока Worker
@@ -57,6 +61,21 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.WorkerRetryDelay, err = envDuration("WORKER_RETRY_DELAY", 5*time.Second); err != nil {
+		return config{}, err
+	}
+	if cfg.WorkerMaxRetryDelay, err = envDuration("WORKER_MAX_RETRY_DELAY", 5*time.Minute); err != nil {
+		return config{}, err
+	}
+	if cfg.WorkerMaxRetries, err = envInt("WORKER_MAX_RETRIES", 5); err != nil {
+		return config{}, err
+	}
+
+	// Политика повторов валидна в любом режиме — дешёвая проверка.
+	if err := (domain.RetryPolicy{
+		BaseDelay:  cfg.WorkerRetryDelay,
+		MaxDelay:   cfg.WorkerMaxRetryDelay,
+		MaxRetries: cfg.WorkerMaxRetries,
+	}).Validate(); err != nil {
 		return config{}, err
 	}
 
