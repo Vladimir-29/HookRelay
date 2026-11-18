@@ -65,6 +65,14 @@ func New(timeout time.Duration, box *secrets.Box) *Sender {
 	}
 }
 
+// NewWithClient создаёт Sender с уже готовым http.Client.
+// Предназначен для тестов и нестандартных транспортов (например,
+// httptest-серверы на loopback, которые блокирует SSRF-dialer).
+// Production-код должен использовать New — там SSRF-защита.
+func NewWithClient(client *http.Client, box *secrets.Box) *Sender {
+	return &Sender{client: client, secrets: box}
+}
+
 // Send выполняет одну попытку доставки. Тело запроса — исходный
 // JSON payload без повторной сериализации; подпись HMAC-SHA256
 // вычисляется по тем же байтам, что уходят в HTTP body.
