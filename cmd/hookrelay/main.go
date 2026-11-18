@@ -45,7 +45,7 @@ func run() error {
 }
 
 func runAPI(ctx context.Context, cfg config, store *postgres.Store) error {
-	server := httpapi.NewServer(cfg.ServerPort, store)
+	server := httpapi.NewServer(cfg.ServerPort, store, cfg.Secrets)
 
 	// Буфер 1: main может уже уйти в shutdown по сигналу, и без буфера
 	// горутина сервера навсегда зависнет на отправке в errCh.
@@ -76,7 +76,7 @@ func runAPI(ctx context.Context, cfg config, store *postgres.Store) error {
 }
 
 func runWorker(ctx context.Context, cfg config, store *postgres.Store) error {
-	sender := delivery.New(cfg.DeliveryHTTPTimeout)
+	sender := delivery.New(cfg.DeliveryHTTPTimeout, cfg.Secrets)
 	w := worker.New(store, sender, worker.Config{
 		BatchSize:    cfg.WorkerBatchSize,
 		PollInterval: cfg.WorkerPollInterval,

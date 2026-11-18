@@ -9,15 +9,18 @@ import (
 	"time"
 
 	"hookrelay/internal/postgres"
+	"hookrelay/internal/secrets"
 )
 
 // NewServer создаёт HTTP-сервер с маршрутами API. Порт передаётся
-// без ведущего двоеточия.
-func NewServer(port string, store *postgres.Store) *http.Server {
+// без ведущего двоеточия. box шифрует секреты endpoint при создании
+// и перевыпуске; без него эти операции недоступны.
+func NewServer(port string, store *postgres.Store, box *secrets.Box) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler(store))
 	mux.HandleFunc("GET /api/v1/endpoints", listEndpointsHandler(store))
-	mux.HandleFunc("POST /api/v1/endpoints", createEndpointHandler(store))
+	mux.HandleFunc("POST /api/v1/endpoints", createEndpointHandler(store, box))
+	mux.HandleFunc("POST /api/v1/endpoints/{id}/rotate-secret", rotateSecretHandler(store, box))
 	mux.HandleFunc("GET /api/v1/endpoints/{id}/subscriptions", getSubscriptionsHandler(store))
 	mux.HandleFunc("PUT /api/v1/endpoints/{id}/subscriptions", replaceSubscriptionsHandler(store))
 	mux.HandleFunc("POST /api/v1/events", createEventHandler(store))

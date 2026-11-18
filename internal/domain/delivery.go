@@ -28,8 +28,14 @@ type ClaimedDelivery struct {
 	EventType  string
 	Payload    json.RawMessage
 	TargetURL  string
-	Attempts   int
-	LeaseUntil time.Time
+	// SecretEncrypted — AES-256-GCM blob секрета endpoint (nonce||ct).
+	// Расшифровывается только в delivery.Sender в момент подписи запроса;
+	// открытый секрет не покидает процесс и не логируется.
+	// nil — у endpoint нет секрета (создан до введения секретов),
+	// такую доставку нельзя подписать → постоянная ошибка.
+	SecretEncrypted []byte
+	Attempts        int
+	LeaseUntil      time.Time
 }
 
 // DeliveryResult — результат одной HTTP-попытки доставки.

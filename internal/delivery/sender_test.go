@@ -2,6 +2,9 @@ package delivery
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +13,26 @@ import (
 	"time"
 
 	"hookrelay/internal/domain"
+	"hookrelay/internal/secrets"
+)
+
+// Общие тестовые секреты: box с нулевым ключом и подпись endpoint.
+var (
+	testBox = func() *secrets.Box {
+		b, err := secrets.NewBox(make([]byte, 32))
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}()
+	testRawSecret = []byte("0123456789abcdef0123456789abcdef")
+	testEncrypted = func() []byte {
+		ct, err := testBox.Seal(testRawSecret)
+		if err != nil {
+			panic(err)
+		}
+		return ct
+	}()
 )
 
 // testSender — Sender с обычным транспортом для httptest-серверов
@@ -18,7 +41,7 @@ func testSender(timeout time.Duration) *Sender {
 	return &Sender{client: &http.Client{
 		Timeout:   timeout,
 		Transport: http.DefaultTransport,
-	}}
+	}, secrets: testBox}
 }
 
 func testDelivery() domain.ClaimedDelivery {
@@ -29,6 +52,8 @@ func testDelivery() domain.ClaimedDelivery {
 		EventType:  "order.created",
 		Payload:    []byte(`{"order_id":123,"amount":100}`),
 		TargetURL:  "", // заполняется в тесте
+		// Зашифрованный тестовый секрет endpoint — Send подписывает запрос.
+		SecretEncrypted: testEncrypted,
 	}
 }
 
@@ -132,7 +157,7 @@ func TestSendRedirectNotFollowed(t *testing.T) {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	}}
+	}, secrets: testBox}
 	d := testDelivery()
 	d.TargetURL = srv.URL
 	res := s.Send(context.Background(), d)
@@ -149,7 +174,7 @@ func TestSendRedirectNotFollowed(t *testing.T) {
 }
 
 func TestNewClientDoesNotFollowRedirects(t *testing.T) {
-	s := New(5 * time.Second)
+	s := New(5*time.Second, testBox)
 	err := s.client.CheckRedirect(nil, nil)
 	if err != http.ErrUseLastResponse {
 		t.Fatalf("CheckRedirect = %v, want ErrUseLastResponse", err)
@@ -207,5 +232,92 @@ func TestSendResponseBodyLimited(t *testing.T) {
 
 	if len(res.Body) > maxResponseBody {
 		t.Fatalf("body len = %d, limit %d", len(res.Body), maxResponseBody)
+	}
+}
+
+func TestSendSignatureHeader(t *testing.T) {
+	var gotSig, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotSig = r.Header.Get("X-HookRelay-Signature")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := testDelivery()
+	d.TargetURL = srv.URL
+	res := testSender(5*time.Second).Send(context.Background(), d)
+	if !res.Success {
+		t.Fatalf("send failed: %+v", res)
+	}
+
+	// Проверка на стороне получателя: HMAC-SHA256(secret, body).
+	mac := hmac.New(sha256.New, testRawSecret)
+	mac.Write([]byte(gotBody))
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(gotSig), []byte(want)) {
+		t.Fatalf("signature = %q, want %q", gotSig, want)
+	}
+}
+
+func TestSendUsesEndpointSecret(t *testing.T) {
+	// Другой секрет endpoint → другая подпись; подпись первого секрета
+	// не должна подходить.
+	otherSecret := []byte("fedcba9876543210fedcba9876543210")
+	otherEnc, err := testBox.Seal(otherSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotSig string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSig = r.Header.Get("X-HookRelay-Signature")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := testDelivery()
+	d.TargetURL = srv.URL
+	d.SecretEncrypted = otherEnc
+	if res := testSender(5*time.Second).Send(context.Background(), d); !res.Success {
+		t.Fatalf("send failed: %+v", res)
+	}
+
+	mac := hmac.New(sha256.New, otherSecret)
+	mac.Write(d.Payload)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(gotSig), []byte(want)) {
+		t.Fatalf("signature = %q, want %q (other endpoint secret)", gotSig, want)
+	}
+}
+
+func TestSendNoSecretIsPermanent(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	for name, enc := range map[string][]byte{
+		"missing (NULL)":   nil,
+		"undecryptable":    []byte("garbage-not-a-box"),
+		"wrong-key-format": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			called = false
+			d := testDelivery()
+			d.TargetURL = srv.URL
+			d.SecretEncrypted = enc
+			res := testSender(5*time.Second).Send(context.Background(), d)
+			if res.Success || res.Retryable {
+				t.Fatalf("result = %+v, want permanent failure", res)
+			}
+			if res.Err == nil {
+				t.Fatal("expected error")
+			}
+			if called {
+				t.Fatal("request must not be sent without a valid secret")
+			}
+		})
 	}
 }

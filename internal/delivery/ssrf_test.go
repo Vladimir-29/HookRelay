@@ -115,7 +115,7 @@ func TestSendBlockedBySSRF(t *testing.T) {
 	stubResolver(t, func(ctx context.Context, host string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 	})
-	s := New(2 * time.Second)
+	s := New(2*time.Second, testBox)
 
 	d := testDelivery()
 	d.TargetURL = "http://internal.example/hook"

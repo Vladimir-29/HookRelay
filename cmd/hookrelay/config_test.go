@@ -1,12 +1,25 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"testing"
 	"time"
 )
 
-func TestLoadConfigDefaults(t *testing.T) {
+// validEncryptionKey — base64 от 32-байтного ключа для тестов.
+func validEncryptionKey() string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+}
+
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("HOOKRELAY_ENCRYPTION_KEY", validEncryptionKey())
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	setRequiredEnv(t)
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
@@ -14,15 +27,45 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.AppMode != "api" {
 		t.Fatalf("AppMode = %q, want api", cfg.AppMode)
 	}
+	if cfg.Secrets == nil {
+		t.Fatal("Secrets box must be initialized")
+	}
 	if cfg.WorkerMaxRetries != 5 || cfg.WorkerMaxRetryDelay != 5*time.Minute ||
 		cfg.WorkerRetryDelay != 5*time.Second {
 		t.Fatalf("unexpected retry defaults: %+v", cfg)
 	}
 }
 
+func TestLoadConfigEncryptionKey(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("HOOKRELAY_ENCRYPTION_KEY", "")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("expected error for missing HOOKRELAY_ENCRYPTION_KEY")
+		}
+	})
+
+	t.Run("not base64", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("HOOKRELAY_ENCRYPTION_KEY", "!!!not-base64!!!")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("expected error for invalid base64")
+		}
+	})
+
+	t.Run("wrong length", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("HOOKRELAY_ENCRYPTION_KEY",
+			base64.StdEncoding.EncodeToString([]byte("short")))
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("expected error for non-32-byte key")
+		}
+	})
+}
+
 func TestLoadConfigWorkerRetryValidation(t *testing.T) {
 	base := func() {
-		t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		setRequiredEnv(t)
 		t.Setenv("APP_MODE", "worker")
 	}
 

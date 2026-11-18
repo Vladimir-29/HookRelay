@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hookrelay/internal/postgres"
+	"hookrelay/internal/secrets"
 )
 
 // maxJSONBody — лимит тела JSON-запросов.
@@ -24,8 +25,19 @@ type createEndpointRequest struct {
 	URL  string `json:"url"`
 }
 
-// Тело ограничено 1 MiB, лишние поля запрещены. На успех — 201 с созданной записью.
-func createEndpointHandler(store *postgres.Store) http.HandlerFunc {
+// createEndpointResponse — ответ POST /api/v1/endpoints.
+// Секрет возвращается только здесь, один раз: GET/list его не содержат.
+type createEndpointResponse struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	Secret    string    `json:"secret"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Тело ограничено 1 MiB, лишние поля запрещены. На успех — 201
+// с созданной записью и секретом подписи (base64url, 32 байта).
+func createEndpointHandler(store *postgres.Store, box *secrets.Box) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createEndpointRequest
 		if !decodeJSONBody(w, r, &req, maxJSONBody) {
@@ -45,13 +57,26 @@ func createEndpointHandler(store *postgres.Store) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		ep, err := store.CreateEndpoint(ctx, name, normalizedURL)
+
+		secret, err := newEndpointSecret(box)
+		if err != nil {
+			log.Printf("generate endpoint secret: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		ep, err := store.CreateEndpoint(ctx, name, normalizedURL, secret.ciphertext)
 		if err != nil {
 			log.Printf("insert endpoint: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
-		writeJSON(w, http.StatusCreated, ep)
+		writeJSON(w, http.StatusCreated, createEndpointResponse{
+			ID:        ep.ID,
+			Name:      ep.Name,
+			URL:       ep.URL,
+			Secret:    secret.encoded,
+			CreatedAt: ep.CreatedAt,
+		})
 	}
 }
 

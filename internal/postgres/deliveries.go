@@ -54,7 +54,7 @@ func (s *Store) ClaimDeliveries(ctx context.Context, workerID string, batchSize 
 		  AND e.id = d.event_id
 		  AND ep.id = d.endpoint_id
 		RETURNING d.id, d.event_id, d.endpoint_id, d.attempts, d.locked_until,
-		          e.event_type, e.payload, ep.url`,
+		          e.event_type, e.payload, ep.url, ep.secret_encrypted`,
 		workerID, lease.Seconds(), batchSize)
 	if err != nil {
 		return nil, err
@@ -66,7 +66,8 @@ func (s *Store) ClaimDeliveries(ctx context.Context, workerID string, batchSize 
 		var d domain.ClaimedDelivery
 		var payload []byte
 		if err := rows.Scan(&d.ID, &d.EventID, &d.EndpointID, &d.Attempts,
-			&d.LeaseUntil, &d.EventType, &payload, &d.TargetURL); err != nil {
+			&d.LeaseUntil, &d.EventType, &payload, &d.TargetURL,
+			&d.SecretEncrypted); err != nil {
 			return nil, err
 		}
 		d.Payload = payload

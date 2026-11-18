@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
 	"hookrelay/internal/domain"
+	"hookrelay/internal/secrets"
 )
 
 // config хранит адрес сервера, URL базы данных и настройки режимов.
@@ -22,6 +24,10 @@ type config struct {
 	WorkerRetryDelay    time.Duration
 	WorkerMaxRetryDelay time.Duration
 	WorkerMaxRetries    int
+
+	// Secrets — AES-256-GCM Box для секретов endpoint: API шифрует
+	// при создании/перевыпуске, Worker расшифровывает для подписи.
+	Secrets *secrets.Box
 }
 
 // leaseSafetyMargin — запас lease над HTTP-таймаутом: пока Worker
@@ -79,12 +85,39 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	// Мастер-ключ обязателен в обоих режимах: API шифрует новые секреты,
+	// Worker расшифровывает их для HMAC-подписи доставок.
+	box, err := loadSecretsBox()
+	if err != nil {
+		return config{}, err
+	}
+	cfg.Secrets = box
+
 	if cfg.AppMode == "worker" && cfg.WorkerLease <= cfg.DeliveryHTTPTimeout+leaseSafetyMargin {
 		return config{}, fmt.Errorf(
 			"WORKER_LEASE_DURATION (%s) must exceed DELIVERY_HTTP_TIMEOUT (%s) + %s margin",
 			cfg.WorkerLease, cfg.DeliveryHTTPTimeout, leaseSafetyMargin)
 	}
 	return cfg, nil
+}
+
+// loadSecretsBox читает HOOKRELAY_ENCRYPTION_KEY — base64-кодированный
+// 32-байтный мастер-ключ для AES-256-GCM. Ключ проверяется при старте:
+// без него сервис не может ни выпустить, ни использовать секреты.
+func loadSecretsBox() (*secrets.Box, error) {
+	encoded := os.Getenv("HOOKRELAY_ENCRYPTION_KEY")
+	if encoded == "" {
+		return nil, fmt.Errorf("HOOKRELAY_ENCRYPTION_KEY is required")
+	}
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("HOOKRELAY_ENCRYPTION_KEY must be base64-encoded: %w", err)
+	}
+	box, err := secrets.NewBox(key)
+	if err != nil {
+		return nil, fmt.Errorf("HOOKRELAY_ENCRYPTION_KEY: %w", err)
+	}
+	return box, nil
 }
 
 func getEnv(key, fallback string) string {
