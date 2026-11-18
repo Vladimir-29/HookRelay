@@ -40,6 +40,9 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: Apply migrations
+        run: DATABASE_URL="$TEST_DATABASE_URL" go run ./cmd/migrate
+
       - name: go test
         run: go test -count=1 ./...
 
@@ -88,6 +91,7 @@ jobs:
           docker compose logs migrate | grep -c "migration applied"
           test "$(docker compose logs migrate | grep -c 'migration applied')" -eq 6
           # Повторный запуск migrate — no-op, состояние не повреждено.
-          docker compose run --rm migrate | tee /tmp/migrate2.log
+          set -o pipefail
+          docker compose run --rm migrate 2>&1 | tee /tmp/migrate2.log
           grep -q "nothing to apply" /tmp/migrate2.log
           docker compose down -v
