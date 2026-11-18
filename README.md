@@ -45,6 +45,62 @@ PostgreSQL выполняет роль как основного хранили�
 
 ## Запуск
 
+### Docker Compose (рекомендуется)
+
+```bash
+git clone <repo-url> hookrelay && cd hookrelay
+cp .env.example .env
+# Сгенерируйте мастер-ключ для шифрования секретов:
+echo "HOOKRELAY_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
+# Задайте POSTGRES_PASSWORD в .env
+
+docker compose up --build -d
+```
+
+Compose поднимает 4 сервиса: `postgres` (с healthcheck и volume `pgdata`), `migrate` (одноразовый — применяет все SQL-миграции и завершается), `api` (порт 8080) и `worker`. API и Worker стартуют только после успешных миграций.
+
+Проверка API:
+
+```bash
+curl localhost:8080/health    # {"status":"ok"}
+```
+
+Создание endpoint — ответ содержит `secret` (base64url) **один раз**, сохраните его:
+
+```bash
+curl -X POST localhost:8080/api/v1/endpoints \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-hook","url":"https://example.com/webhook"}'
+# → {"id":1,"name":"my-hook","url":"...","secret":"...","created_at":"..."}
+```
+
+Подписка на событие:
+
+```bash
+curl -X PUT localhost:8080/api/v1/endpoints/1/subscriptions \
+  -H 'Content-Type: application/json' \
+  -d '{"event_types":["order.created"]}'
+```
+
+Тестовое событие → Worker доставит вебхук с подписью `X-HookRelay-Signature`:
+
+```bash
+curl -X POST localhost:8080/api/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_type":"order.created","payload":{"order_id":42}}'
+```
+
+Логи и управление:
+
+```bash
+docker compose logs -f api worker migrate
+docker compose ps
+docker compose down          # остановить, данные PostgreSQL сохранятся в volume pgdata
+docker compose down -v       # остановить и УДАЛИТЬ данные PostgreSQL
+```
+
+### Локальный запуск (без Docker)
+
 API и Worker запускаются из одной кодовой базы в разных режимах через переменную `APP_MODE`.
 
 ```bash
@@ -55,7 +111,12 @@ APP_MODE=api
 APP_MODE=worker
 ```
 
-Для подключения к PostgreSQL необходимо задать `DATABASE_URL`.
+Потребуются `DATABASE_URL` и `HOOKRELAY_ENCRYPTION_KEY` (см. `.env.example`). Миграции применяются командой:
+
+```bash
+go run ./cmd/migrate   # DATABASE_URL=... go run ./cmd/migrate
+```
+
 
 Дополнительные параметры Worker:
 
@@ -101,7 +162,7 @@ assert hmac.compare_digest(received_signature, expected)
 
 Проект находится в активной разработке.
 
-Реализованы API, хранение событий и доставок, конкурентная очередь PostgreSQL, Worker, безопасная HTTP-отправка, ручной retry доставок и HMAC-SHA256 подписи вебхуков.
+Реализованы API, хранение событий и доставок, конкурентная очередь PostgreSQL, Worker, безопасная HTTP-отправка, ручной retry доставок, HMAC-SHA256 подписи вебхуков и Docker-окружение с автоматическими миграциями.
 
 В планах:
-- Docker Compose и финальные end-to-end проверки.
+- Финальные end-to-end проверки.

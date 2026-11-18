@@ -1,0 +1,8 @@
+.git
+.env
+*.md
+!README.md
+tmp
+bin
+hookrelay
+hookrelay-migrate

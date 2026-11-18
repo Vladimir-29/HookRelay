@@ -1,0 +1,71 @@
+# HookRelay: PostgreSQL + миграции + API + Worker.
+# Секреты берутся из .env (см. .env.example) — не коммитить реальные значения.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-relay_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hookrelay_db}
+    volumes:
+      # PG18+ хранит данные в versioned-подкаталогах — монтируем родителя.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    image: hookrelay:local
+    entrypoint: ["/usr/local/bin/hookrelay-migrate"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-relay_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hookrelay_db}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: hookrelay:local
+    environment:
+      APP_MODE: api
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      DATABASE_URL: postgres://${POSTGRES_USER:-relay_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hookrelay_db}?sslmode=disable
+      HOOKRELAY_ENCRYPTION_KEY: ${HOOKRELAY_ENCRYPTION_KEY:?set HOOKRELAY_ENCRYPTION_KEY in .env}
+    ports:
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: hookrelay:local
+    environment:
+      APP_MODE: worker
+      DATABASE_URL: postgres://${POSTGRES_USER:-relay_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hookrelay_db}?sslmode=disable
+      HOOKRELAY_ENCRYPTION_KEY: ${HOOKRELAY_ENCRYPTION_KEY:?set HOOKRELAY_ENCRYPTION_KEY in .env}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-10}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-1s}
+      WORKER_LEASE_DURATION: ${WORKER_LEASE_DURATION:-30s}
+      DELIVERY_HTTP_TIMEOUT: ${DELIVERY_HTTP_TIMEOUT:-10s}
+      WORKER_RETRY_DELAY: ${WORKER_RETRY_DELAY:-5s}
+      WORKER_MAX_RETRY_DELAY: ${WORKER_MAX_RETRY_DELAY:-5m}
+      WORKER_MAX_RETRIES: ${WORKER_MAX_RETRIES:-5}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
